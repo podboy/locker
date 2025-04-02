@@ -4,25 +4,24 @@ from errno import ECANCELED
 import os
 from typing import Optional
 from typing import Sequence
+from typing import Tuple
 
-from xhtml import FlaskProxy
-from xhtml import LocaleTemplate
 from xkits_command import ArgParser
 from xkits_command import Command
 from xkits_command import CommandArgument
 from xkits_command import CommandExecutor
 from xpw import AuthInit
+from xpw import BasicAuth
 from xpw import DEFAULT_CONFIG_FILE
-from xpw import SessionKeys
 
-from xpw_locker import server
 from xpw_locker.attribute import __description__
-from xpw_locker.attribute import __project__
 from xpw_locker.attribute import __urlhome__
 from xpw_locker.attribute import __version__
+from xpw_locker.server import AuthRequestProxy
+from xpw_locker.server import run
 
 
-@CommandArgument(__project__, description=__description__)
+@CommandArgument("locker", description=__description__)
 def add_cmd(_arg: ArgParser):
     _arg.add_argument("--config", type=str, dest="config_file",
                       help="Authentication configuration", metavar="FILE",
@@ -43,13 +42,12 @@ def add_cmd(_arg: ArgParser):
 
 @CommandExecutor(add_cmd)
 def run_cmd(cmds: Command) -> int:
-    server.PORT = cmds.args.listen_port
-    server.HOST = cmds.args.listen_address
-    server.AUTH = AuthInit.from_file(cmds.args.config_file)
-    server.PROXY = FlaskProxy(cmds.args.target_url)
-    server.SESSIONS = SessionKeys(lifetime=cmds.args.lifetime * 3600)
-    server.TEMPLATE = LocaleTemplate(os.path.join(server.BASE, "resources"))
-    server.run()
+    target_url: str = cmds.args.target_url
+    lifetime: int = cmds.args.lifetime * 3600
+    auth: BasicAuth = AuthInit.from_file(cmds.args.config_file)
+    listen_address: Tuple[str, int] = (cmds.args.listen_address, cmds.args.listen_port)  # noqa:E501
+    request_proxy: AuthRequestProxy = AuthRequestProxy(target_url=target_url, lifetime=lifetime, auth=auth)  # noqa:E501
+    run(listen_address=listen_address, request_proxy=request_proxy)
     return ECANCELED
 
 
