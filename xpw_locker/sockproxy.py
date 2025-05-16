@@ -23,11 +23,8 @@ from xkits_lib import TimeUnit
 from xkits_logger import Color
 from xkits_logger import Logger
 from xkits_thread import ThreadPool
-from xpw import AuthInit
+from xpw import Account
 from xpw import DEFAULT_CONFIG_FILE
-from xpw import Pass
-from xpw import SessionKeys
-from xpw import TokenAuth
 from xserver.sock.header import RequestHeader
 from xserver.sock.proxy import SockProxy
 
@@ -40,22 +37,16 @@ from xpw_locker.attribute import __version__
 class AuthProxy():
     BASE: str = os.path.dirname(__file__)
 
-    def __init__(self, host: str, port: int,  # pylint:disable=R0913,R0917
-                 timeout: TimeUnit = 300, lifetime: int = 86400,
-                 auth: Optional[TokenAuth] = None):
+    def __init__(self, host: str, port: int, timeout: TimeUnit = 300,
+                 account: Optional[Account] = None):
         resources: str = os.path.join(self.BASE, "resources")
-        self.__authentication: TokenAuth = auth or AuthInit.from_file()
-        self.__sessions: SessionKeys = SessionKeys(lifetime=lifetime)
         self.__template: LocaleTemplate = LocaleTemplate(resources)
+        self.__account: Account = account or Account.from_file()
         self.__proxy: SockProxy = SockProxy(host, port, timeout)
 
     @property
-    def authentication(self) -> TokenAuth:
-        return self.__authentication
-
-    @property
-    def sessions(self) -> SessionKeys:
-        return self.__sessions
+    def account(self) -> Account:
+        return self.__account
 
     @property
     def template(self) -> LocaleTemplate:
@@ -76,7 +67,7 @@ class AuthProxy():
         client.sendall(f"{Headers.CONTENT_TYPE.value}: text/html\r\n".encode())
         client.sendall(f"{Headers.CONTENT_LENGTH.value}: {len(datas)}\r\n".encode())  # noqa:E501
         if not session_id:
-            session_id = self.sessions.search().name
+            session_id = self.account.tickets.search().data.session_id
             client.sendall(f"{Headers.SET_COOKIE.value}: session_id={session_id}\r\n".encode())  # noqa:E501
         client.sendall(b"\r\n")
         client.sendall(datas)
@@ -85,18 +76,19 @@ class AuthProxy():
         if head.request_line.target == "/favicon.ico":
             return self.proxy.new_connection(client, data)
 
+        cookies: Cookies = Cookies(head.headers.get(Headers.COOKIE.value, ""))
+        session_id: str = cookies.get("session_id")
+
         authorization: str = head.headers.get(Headers.AUTHORIZATION.value, "")
         if authorization:
             from xhtml.header.authorization import \
                 Authorization  # pylint:disable=import-outside-toplevel
 
             auth: Authorization.Auth = Authorization.paser(authorization)
-            if self.authentication.verify(auth.username, auth.password):
+            if self.account.login(auth.username, auth.password, session_id):
                 return self.proxy.new_connection(client, data)  # verified
 
-        cookies: Cookies = Cookies(head.headers.get(Headers.COOKIE.value, ""))
-        session_id: str = cookies.get("session_id")
-        if session_id and self.sessions.verify(session_id):
+        if session_id and self.account.check(session_id):
             return self.proxy.new_connection(client, data)
 
         input_error_prompt: str = ""
@@ -111,8 +103,7 @@ class AuthProxy():
             password: str = form_data.get("password", [""])[0]
             if not password:
                 input_error_prompt = section.get("input_password_is_null")
-            elif self.authentication.verify(username, password):
-                self.sessions.sign_in(session_id)
+            elif self.account.login(username, password, session_id):
                 return self.send_redirect(client, head.request_line.target)
             else:
                 input_error_prompt = section.get("input_verify_error")
@@ -148,8 +139,7 @@ class AuthProxy():
 
 def run(listen_address: Tuple[str, int],  # pylint:disable=R0913,R0917
         target_host: str, target_port: int,
-        auth: Optional[TokenAuth] = None,
-        lifetime: int = 86400,
+        account: Optional[Account] = None,
         timeout: TimeUnit = 10,
         max_workers: int = 100):
     max_workers = max(min(10, max_workers), 1000)
@@ -160,10 +150,8 @@ def run(listen_address: Tuple[str, int],  # pylint:disable=R0913,R0917
         Logger.stderr(Color.green(f"Server listening on {listen_address}"))
 
         with ThreadPool(max_workers=max_workers) as pool:
-            proxy: AuthProxy = AuthProxy(
-                host=target_host, port=target_port,
-                timeout=timeout, lifetime=lifetime,
-                auth=auth)
+            proxy: AuthProxy = AuthProxy(host=target_host, port=target_port,
+                                         timeout=timeout, account=account)
 
             while True:
                 client, address = server.accept()
@@ -208,16 +196,15 @@ def run_cmd(cmds: Command) -> int:
     target_host: str = cmds.args.target_host
     target_port: int = cmds.args.target_port
     lifetime: int = cmds.args.lifetime * 3600
-    auth: TokenAuth = AuthInit.from_file(cmds.args.config_file)
+    account: Account = Account.from_file(cmds.args.config_file, lifetime=lifetime)  # noqa:E501
     listen_address: Tuple[str, int] = (cmds.args.listen_address, cmds.args.listen_port)  # noqa:E501
-    api_token: str = cmds.args.api_token or Pass.random_generate(32, Pass.CharacterSet.BASIC).value  # noqa:E501
-    cmds.logger.info(f"API key: {api_token}")
-    auth.update_token(api_token)
+    # api_token: str = cmds.args.api_token or Pass.random_generate(32, Pass.CharacterSet.BASIC).value  # noqa:E501
+    # cmds.logger.info(f"API key: {api_token}")
+    # account.update_token(api_token)
     run(listen_address=listen_address,
         target_host=target_host,
         target_port=target_port,
-        auth=auth,
-        lifetime=lifetime,
+        account=account,
         timeout=timeout,
         max_workers=max_workers)
     return ECANCELED

@@ -20,11 +20,8 @@ from xkits_command import CommandArgument
 from xkits_command import CommandExecutor
 from xkits_logger import Color
 from xkits_logger import Logger
-from xpw import AuthInit
+from xpw import Account
 from xpw import DEFAULT_CONFIG_FILE
-from xpw import Pass
-from xpw import SessionKeys
-from xpw import TokenAuth
 from xserver.http.proxy import HttpProxy
 from xserver.http.proxy import RequestProxy
 from xserver.http.proxy import ResponseProxy
@@ -37,27 +34,21 @@ from xpw_locker.attribute import __version__
 
 class AuthRequestProxy(RequestProxy):
 
-    def __init__(self,  # pylint:disable=R0913,R0917
-                 target_url: str, authentication: TokenAuth,
-                 session_keys: SessionKeys, template: LocaleTemplate):
-        self.__authentication: TokenAuth = authentication
-        self.__sessions: SessionKeys = session_keys
+    def __init__(self, template: LocaleTemplate,
+                 target_url: str, account: Account):
         self.__template: LocaleTemplate = template
+        self.__account: Account = account
         super().__init__(target_url)
 
     @property
-    def authentication(self) -> TokenAuth:
-        return self.__authentication
-
-    @property
-    def sessions(self) -> SessionKeys:
-        return self.__sessions
+    def account(self) -> Account:
+        return self.__account
 
     @property
     def template(self) -> LocaleTemplate:
         return self.__template
 
-    def authenticate(self, path: str,  # pylint:disable=R0911,R0912,R0914
+    def authenticate(self, path: str,  # pylint:disable=too-many-locals
                      method: str, data: bytes,
                      headers: MutableMapping[str, str]
                      ) -> Optional[ResponseProxy]:
@@ -67,18 +58,19 @@ class AuthRequestProxy(RequestProxy):
         # if "localhost" in headers.get(Headers.HOST.value, ""):
         #     return None
 
+        cookies: Cookies = Cookies(headers.get(Headers.COOKIE.value, ""))
+        session_id: str = cookies.get("session_id")
+
         authorization: str = headers.get(Headers.AUTHORIZATION.value, "")
         if authorization:
             from xhtml.header.authorization import \
                 Authorization  # pylint:disable=import-outside-toplevel
 
             auth: Authorization.Auth = Authorization.paser(authorization)
-            if self.authentication.verify(auth.username, auth.password):
+            if self.account.login(auth.username, auth.password, session_id):
                 return None  # verified
 
-        cookies: Cookies = Cookies(headers.get(Headers.COOKIE.value, ""))
-        session_id: str = cookies.get("session_id")
-        if session_id and self.sessions.verify(session_id):
+        if session_id and self.account.check(session_id):
             return None  # logged
 
         input_error_prompt: str = ""
@@ -89,8 +81,7 @@ class AuthRequestProxy(RequestProxy):
             password: str = form_data.get("password", [""])[0]
             if not password:
                 input_error_prompt = section.get("input_password_is_null")
-            elif self.authentication.verify(username, password):
-                self.sessions.sign_in(session_id)
+            elif self.account.login(username, password, session_id):
                 return ResponseProxy.redirect(location=path)
             else:
                 input_error_prompt = section.get("input_verify_error")
@@ -100,7 +91,7 @@ class AuthRequestProxy(RequestProxy):
         content = self.template.seek("login.html").render(**context)
         response = ResponseProxy.make_ok_response(content.encode())
         if not session_id:
-            response.set_cookie("session_id", self.sessions.search().name)
+            response.set_cookie("session_id", self.account.tickets.search().data.session_id)  # noqa:E501
         return response
 
     def request(self, *args, **kwargs) -> ResponseProxy:
@@ -108,22 +99,19 @@ class AuthRequestProxy(RequestProxy):
 
     @classmethod
     def create(cls, *args, **kwargs) -> "AuthRequestProxy":
-        return cls(target_url=kwargs["target_url"],
-                   authentication=kwargs["authentication"],
-                   session_keys=kwargs["session_keys"],
-                   template=kwargs["template"])
+        return cls(template=kwargs["template"], target_url=kwargs["target_url"],  # noqa:E501
+                   account=kwargs["account"])
 
 
 def run(listen_address: Tuple[str, int], target_url: str,
-        auth: Optional[TokenAuth] = None, lifetime: int = 86400):
+        account: Optional[Account] = None):
+    if account is None:
+        account = Account.from_file()
     base: str = os.path.dirname(__file__)
-    authentication: TokenAuth = auth or AuthInit.from_file()
-    session_keys: SessionKeys = SessionKeys(lifetime=lifetime)
     template: LocaleTemplate = LocaleTemplate(os.path.join(base, "resources"))
     httpd = ThreadingHTTPServer(listen_address, lambda *args: HttpProxy(
         *args, create_request_proxy=AuthRequestProxy.create,
-        target_url=target_url, authentication=authentication,
-        session_keys=session_keys, template=template))
+        template=template, target_url=target_url, account=account))
     Logger.stderr(Color.green(f"Server listening on {listen_address}"))
     httpd.serve_forever()
 
@@ -154,15 +142,14 @@ def add_cmd(_arg: ArgParser):
 def run_cmd(cmds: Command) -> int:
     target_url: str = cmds.args.target_url
     lifetime: int = cmds.args.lifetime * 3600
-    auth: TokenAuth = AuthInit.from_file(cmds.args.config_file)
+    account: Account = Account.from_file(cmds.args.config_file, lifetime=lifetime)  # noqa:E501
     listen_address: Tuple[str, int] = (cmds.args.listen_address, cmds.args.listen_port)  # noqa:E501
-    api_token: str = cmds.args.api_token or Pass.random_generate(32, Pass.CharacterSet.BASIC).value  # noqa:E501
-    cmds.logger.info(f"API key: {api_token}")
-    auth.update_token(api_token)
+    # api_token: str = cmds.args.api_token or Pass.random_generate(32, Pass.CharacterSet.BASIC).value  # noqa:E501
+    # cmds.logger.info(f"API key: {api_token}")
+    # account.update_token(api_token)
     run(listen_address=listen_address,
         target_url=target_url,
-        auth=auth,
-        lifetime=lifetime)
+        account=account)
     return ECANCELED
 
 
